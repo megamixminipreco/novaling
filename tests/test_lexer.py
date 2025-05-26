@@ -54,5 +54,35 @@ class TestLexer(unittest.TestCase):
         ]
         self.assertEqual(tokenize(code), expected_tokens)
 
+    def test_unknown_token_reporting(self):
+        code = "a = 10; \n$ সমস্যা" # $ is unknown, সমস্যা are unicode chars
+        tokens = tokenize(code)
+        # Expected:
+        # {'type': 'IDENTIFIER', 'value': 'a', 'line': 1, 'col': 1}, 
+        # {'type': 'ASSIGN', 'value': '=', 'line': 1, 'col': 3}, 
+        # {'type': 'NUMBER', 'value': '10', 'line': 1, 'col': 5}, 
+        # {'type': 'SEMICOLON', 'value': ';', 'line': 1, 'col': 7},
+        # -- NEWLINE processed by lexer for line count --
+        # {'type': 'UNKNOWN', 'value': '$', 'line': 2, 'col': 1},
+        # -- WHITESPACE after $ --
+        # {'type': 'UNKNOWN', 'value': 'স', 'line': 2, 'col': 3},
+        # {'type': 'UNKNOWN', 'value': 'ম', 'line': 2, 'col': 4},
+        # ...and so on for other unicode chars if they are treated individually.
+        # The current lexer's UNKNOWN token consumes one character at a time.
+        
+        unknown_token_1 = next((t for t in tokens if t['type'] == 'UNKNOWN' and t['value'] == '$'), None)
+        self.assertIsNotNone(unknown_token_1, "Expected UNKNOWN token for '$'")
+        self.assertEqual(unknown_token_1['line'], 2)
+        self.assertEqual(unknown_token_1['col'], 1)
+        
+        # Check for the first unicode character 'স'
+        unknown_token_2 = next((t for t in tokens if t['type'] == 'UNKNOWN' and t['value'] == 'স'), None)
+        self.assertIsNotNone(unknown_token_2, "Expected UNKNOWN token for 'স'")
+        self.assertEqual(unknown_token_2['line'], 2)
+        # The column for 'স' depends on how whitespace after '$' is handled.
+        # Lexer's WHITESPACE token: r"[ \t]+" (excludes newline)
+        # Code: "$ সমস্যা" -> '$' (col 1), ' ' (col 2, skipped), 'স' (col 3)
+        self.assertEqual(unknown_token_2['col'], 3)
+
 if __name__ == '__main__':
     unittest.main()

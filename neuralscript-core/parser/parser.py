@@ -1,435 +1,494 @@
 # neuralscript-core/parser/parser.py
-# (Assuming ASTNode is already defined as in the previous version, or defined here)
 
 class ASTNode:
     def __init__(self, node_type, children=None, value=None, **kwargs):
         self.type = node_type
-        self.value = value # For literals, identifiers, operator type
+        self.value = value 
         self.children = children if children is not None else []
-        self.__dict__.update(kwargs) # For additional named attributes
+        self.__dict__.update(kwargs) 
+        # Store line/col from token if provided
+        if 'token' in kwargs and kwargs['token'] is not None and isinstance(kwargs['token'], dict):
+             self.line = kwargs['token'].get('line')
+             self.col = kwargs['token'].get('col')
+        else: # Default if no token provided
+            self.line = None
+            self.col = None
 
-    def __repr__(self, level=0):
+    def __repr__(self, level=0): # Updated to include line/col if present
         ret = "\t" * level + f"ASTNode(type='{self.type}'"
         if self.value is not None:
             ret += f", value='{self.value}'"
         
-        # Print other specific attributes common in new nodes
-        for attr in ['name', 'operator', 'callee', 'params', 'return_type']:
+        attrs_to_print = ['name', 'operator', 'callee', 'params', 'return_type', 'type_hint', 'has_else']
+        for attr in attrs_to_print:
             if hasattr(self, attr) and getattr(self, attr) is not None:
-                # For params, which could be a list of ASTNodes, handle differently
-                if attr == 'params' and isinstance(getattr(self, attr), list):
-                    param_repr = "[" + ", ".join([p.__repr__(level+1) for p in getattr(self, attr)]) + "]"
+                val = getattr(self, attr)
+                if attr == 'params' and isinstance(val, list): 
+                    param_repr = "[" + ", ".join([p.__repr__(level+1) if isinstance(p, ASTNode) else str(p) for p in val]) + "]"
                     ret += f", {attr}={param_repr}"
+                elif isinstance(val, ASTNode): 
+                     ret += f", {attr}=\n" + val.__repr__(level + 1)
                 else:
-                    ret += f", {attr}='{getattr(self, attr)}'"
+                    ret += f", {attr}='{val}'"
+        
+        if self.line is not None: ret += f", line={self.line}"
+        if self.col is not None: ret += f", col={self.col}"
 
         if self.children:
-            ret += ", children=[\n"
-            for child in self.children:
-                if child: # Check if child is not None
-                    ret += child.__repr__(level + 1) + ",\n"
-                else:
-                    ret += "\t" * (level + 1) + "None,\n" # Represent None child
-            ret += "\t" * level + "]"
+            # Avoid double printing children if a named attribute (like 'body' for FunctionDefNode) is the same list.
+            is_named_child_list = any(hasattr(self, attr_name) and getattr(self, attr_name) is self.children for attr_name in ['body']) 
+            if not is_named_child_list and self.children: 
+                ret += ", children=[\n"
+                for child in self.children:
+                    if child: ret += child.__repr__(level + 1) + ",\n"
+                    else: ret += "\t" * (level + 1) + "None,\n" 
+                ret += "\t" * level + "]"
         ret += ")"
         return ret
 
-# --- New/Updated AST Node type aliases for clarity (optional, but good practice) ---
-# These could also be actual classes inheriting from ASTNode if more specific logic is needed
+# --- Node factory functions updated to pass token for positional info ---
+def ProgramNode(statements, token=None):
+    if not token and statements:
+        first_stmt_token = getattr(statements[0], 'token', None)
+        if first_stmt_token:
+            token = first_stmt_token
+        elif hasattr(statements[0], 'line') and statements[0].line is not None :
+            token = {'line': statements[0].line, 'col': statements[0].col, 'value': 'ProgramStart', 'type': 'PROGRAM_START'}
+    if not token: 
+        token = {'line': 1, 'col': 1, 'value': 'ProgramStart', 'type': 'PROGRAM_START'}
+    return ASTNode(node_type='Program', children=statements, token=token)
 
-def ProgramNode(statements):
-    return ASTNode(node_type='Program', children=statements)
+def AssignmentNode(target_token, value_expr, assign_op_token):
+    return ASTNode(node_type='Assignment', name=target_token['value'], children=[value_expr], token=assign_op_token)
 
-def AssignmentNode(target, value_expr):
-    # Ensure target is an ASTNode if it's an identifier, or allow string for simplicity
-    # For now, assume target is an identifier string, value_expr is an ASTNode
-    return ASTNode(node_type='Assignment', name=target, children=[value_expr])
+def IdentifierNode(token):
+    return ASTNode(node_type='Identifier', name=token['value'], token=token)
 
-def IdentifierNode(name):
-    return ASTNode(node_type='Identifier', name=name)
+def NumberLiteralNode(token):
+    return ASTNode(node_type='NumberLiteral', value=float(token['value']), token=token)
 
-def NumberLiteralNode(value):
-    return ASTNode(node_type='NumberLiteral', value=value)
+def StringLiteralNode(token):
+    return ASTNode(node_type='StringLiteral', value=token['value'][1:-1], token=token)
 
-def StringLiteralNode(value):
-    return ASTNode(node_type='StringLiteral', value=value)
+def BooleanLiteralNode(token):
+    return ASTNode(node_type='BooleanLiteral', value=(token['value'] == 'TRUE'), token=token)
 
-def BooleanLiteralNode(value): # value is Python bool True/False
-    return ASTNode(node_type='BooleanLiteral', value=value)
-
-def VectorLiteralNode(elements):
-    return ASTNode(node_type='VectorLiteral', children=elements)
-
-def MatrixLiteralNode(rows): # Assuming rows is a list of VectorLiteralNode or similar
-    return ASTNode(node_type='MatrixLiteral', children=rows)
+def VectorLiteralNode(element_nodes, vector_keyword_token):
+    return ASTNode(node_type='VectorLiteral', children=element_nodes, token=vector_keyword_token)
     
-def BinaryOperationNode(left, op, right):
-    return ASTNode(node_type='BinaryOperation', operator=op, children=[left, right])
+def BinaryOperationNode(left, op_token, right):
+    return ASTNode(node_type='BinaryOperation', operator=op_token['value'], children=[left, right], token=op_token)
 
-def NeuralOperationNode(operation_name, arguments):
-    # operation_name is a string like "ATTEND", arguments is a list of ASTNodes
-    return ASTNode(node_type='NeuralOperation', name=operation_name, children=arguments)
+def NeuralOperationNode(op_token, arg_nodes):
+    return ASTNode(node_type='NeuralOperation', name=op_token['value'], children=arg_nodes, token=op_token)
 
-def FunctionDefNode(name, params, body, return_type=None):
-    # name: string, params: list of IdentifierNodes (or strings), body: list of statement ASTNodes
-    return ASTNode(node_type='FunctionDef', name=name, params=params, return_type=return_type, children=body)
+def FunctionDefNode(def_token, name_token, params_list, return_type_node_or_val, body_program_node):
+    if not (isinstance(body_program_node, ASTNode) and body_program_node.type == 'Program'):
+        body_program_node = ProgramNode(body_program_node.children if hasattr(body_program_node, 'children') else [], 
+                                        token=getattr(body_program_node, 'token', def_token))
+    return ASTNode(node_type='FunctionDef', 
+                   name=name_token['value'], 
+                   params=params_list, 
+                   return_type=return_type_node_or_val, 
+                   children=[body_program_node], # Body is a ProgramNode
+                   token=def_token)
 
-def ReturnNode(expression):
-    return ASTNode(node_type='Return', children=[expression] if expression else [])
+def ReturnNode(return_token, expression_node=None):
+    # Ensure expression_node is not None before putting it in a list if it's the only child
+    children_list = [expression_node] if expression_node is not None else []
+    return ASTNode(node_type='Return', children=children_list, token=return_token)
 
-def IfNode(condition, then_branch, else_branch=None):
-    children = [condition, then_branch]
-    if else_branch:
-        children.append(else_branch)
-    return ASTNode(node_type='If', children=children, has_else=else_branch is not None)
 
-def CallNode(callee_name, arguments): # callee_name as string for simplicity
-    return ASTNode(node_type='Call', callee=callee_name, children=arguments)
+def IfNode(if_token, condition_node, then_branch_program_node, else_branch_program_node=None):
+    children = [condition_node, then_branch_program_node]
+    if else_branch_program_node:
+        children.append(else_branch_program_node)
+    return ASTNode(node_type='If', children=children, has_else=else_branch_program_node is not None, token=if_token)
+
+def CallNode(callee_token, arg_nodes): 
+     return ASTNode(node_type='Call', callee=callee_token['value'], children=arg_nodes, token=callee_token)
 
 
 class Parser:
     def __init__(self, tokens):
-        self.tokens = [token for token in tokens if token[0] not in ['WHITESPACE', 'COMMENT']] # Filter out
+        self.tokens = [t for t in tokens if t['type'] not in ['WHITESPACE', 'COMMENT', 'NEWLINE']]
         self.pos = 0
-        self.current_token = self.tokens[self.pos] if self.tokens else (None, None)
+        
+        eof_line, eof_col = 1, 1 
+        if self.tokens:
+            last_real_token = self.tokens[-1]
+            eof_line = last_real_token['line']
+            eof_col = last_real_token['col'] + len(str(last_real_token['value'])) 
+        else: 
+            eof_line = 1 
+            eof_col = 1
+
+        self.eof_sentinel = {'type': None, 'value': None, 'line': eof_line, 'col': eof_col, 'error_type': 'EOF'}
+        self.current_token = self.tokens[self.pos] if self.pos < len(self.tokens) else self.eof_sentinel
 
     def _advance(self):
         self.pos += 1
-        if self.pos < len(self.tokens):
-            self.current_token = self.tokens[self.pos]
-        else:
-            self.current_token = (None, None) # (Type, Value)
+        self.current_token = self.tokens[self.pos] if self.pos < len(self.tokens) else self.eof_sentinel
 
     def _peek(self):
-        if self.pos + 1 < len(self.tokens):
-            return self.tokens[self.pos + 1]
-        return (None, None)
+        return self.tokens[self.pos + 1] if self.pos + 1 < len(self.tokens) else self.eof_sentinel 
 
     def _expect(self, token_type, token_value=None):
-        ttype, tval = self.current_token
-        if ttype == token_type:
-            if token_value is None or tval == token_value:
-                token = self.current_token
+        tok = self.current_token
+        if tok['type'] == token_type:
+            if token_value is None or tok['value'] == token_value:
+                consumed_token = tok
                 self._advance()
-                return token
+                return consumed_token
             else:
-                raise SyntaxError(f"Expected token value {token_value} for type {token_type}, got {tval} at pos {self.pos}")
-        raise SyntaxError(f"Expected token type {token_type}, got {ttype} at pos {self.pos} (current token: {self.current_token})")
+                err = SyntaxError(
+                    f"Line {tok['line']}:{tok['col']}: Expected token value '{token_value}' for type '{token_type}', "
+                    f"got value '{tok['value']}'"
+                )
+                raise err
+        elif tok.get('error_type') == 'EOF': 
+             err = SyntaxError(
+                f"Line {tok['line']}:{tok['col']}: Unexpected end of input. Expected '{token_type}'."
+            )
+             raise err
+        else: 
+            err = SyntaxError(
+                f"Line {tok['line']}:{tok['col']}: Expected token type '{token_type}', "
+                f"got type '{tok['type']}' (value: '{tok['value']}')"
+            )
+            raise err
 
     def parse_atom(self):
-        ttype, tval = self.current_token
-        if ttype == 'NUMBER':
+        tok = self.current_token
+        if tok['type'] == 'NUMBER':
             self._advance()
-            return NumberLiteralNode(float(tval)) # Or int(tval) if no decimals
-        elif ttype == 'STRING':
+            return NumberLiteralNode(tok)
+        elif tok['type'] == 'STRING':
             self._advance()
-            return StringLiteralNode(tval[1:-1]) # Remove quotes
-        elif ttype == 'TRUE':
+            return StringLiteralNode(tok)
+        elif tok['type'] == 'TRUE' or tok['type'] == 'FALSE':
             self._advance()
-            return BooleanLiteralNode(True)
-        elif ttype == 'FALSE':
-            self._advance()
-            return BooleanLiteralNode(False)
-        elif ttype == 'IDENTIFIER':
-            name = tval
-            self._advance()
-            if self.current_token[0] == 'LPAREN': # Function call
-                self._advance() # Consume LPAREN
+            return BooleanLiteralNode(tok)
+        elif tok['type'] == 'IDENTIFIER':
+            identifier_token = tok 
+            self._advance() 
+            if self.current_token['type'] == 'LPAREN': 
+                self._expect('LPAREN') 
                 args = []
-                if self.current_token[0] != 'RPAREN': # Check if there are arguments
+                if self.current_token['type'] != 'RPAREN':
                     while True:
+                        if self.current_token.get('error_type') == 'EOF':
+                             raise SyntaxError(f"Line {identifier_token['line']}:{identifier_token['col']}: Unexpected EOF in function call argument list for '{identifier_token['value']}'. Expected expression or ')'.")
                         args.append(self.parse_expression())
-                        if self.current_token[0] == 'COMMA':
+                        if self.current_token['type'] == 'COMMA':
                             self._advance()
-                        elif self.current_token[0] == 'RPAREN':
+                        elif self.current_token['type'] == 'RPAREN':
                             break
                         else:
-                            raise SyntaxError(f"Expected COMMA or RPAREN in argument list, got {self.current_token[0]}")
+                            err_tok_arg = self.current_token
+                            raise SyntaxError(f"Line {err_tok_arg['line']}:{err_tok_arg['col']}: Expected ',' or ')', got '{err_tok_arg['value']}' (type: {err_tok_arg['type']})")
                 self._expect('RPAREN')
-                return CallNode(callee_name=name, arguments=args)
-            return IdentifierNode(name)
-        elif ttype == 'LPAREN':
+                return CallNode(callee_token=identifier_token, arg_nodes=args)
+            return IdentifierNode(identifier_token) 
+        elif tok['type'] == 'LPAREN':
+            start_paren_tok = tok # Keep for potential ParenExpressionNode position
             self._advance()
             expr = self.parse_expression()
             self._expect('RPAREN')
-            return expr
-        elif ttype == 'VECTOR': # VECTOR [el1, el2]
-            self._advance()
+            # If creating a specific ParenExpressionNode:
+            # return ASTNode(node_type='ParenExpression', children=[expr], token=start_paren_tok)
+            return expr 
+        elif tok['type'] == 'VECTOR':
+            vector_tok = tok
+            self._advance() 
             self._expect('LBRACKET')
             elements = []
-            if self.current_token[0] != 'RBRACKET': # Check if there are elements
+            if self.current_token['type'] != 'RBRACKET':
                 while True:
+                    if self.current_token.get('error_type') == 'EOF':
+                        raise SyntaxError(f"Line {vector_tok['line']}:{vector_tok['col']}: Unexpected EOF in vector literal. Expected ']' or vector elements.")
                     elements.append(self.parse_expression())
-                    if self.current_token[0] == 'COMMA':
+                    if self.current_token['type'] == 'COMMA':
                         self._advance()
-                    elif self.current_token[0] == 'RBRACKET':
+                    elif self.current_token['type'] == 'RBRACKET':
                         break
                     else:
-                        raise SyntaxError(f"Expected COMMA or RBRACKET in vector literal, got {self.current_token[0]}")
+                        err_tok_vec = self.current_token
+                        raise SyntaxError(f"Line {err_tok_vec['line']}:{err_tok_vec['col']}: Expected ',' or ']' in vector literal, got '{err_tok_vec['value']}' (type: {err_tok_vec['type']})")
             self._expect('RBRACKET')
-            return VectorLiteralNode(elements)
-        elif ttype in ['ATTEND', 'SAMPLE', 'PROPAGATE', 'MERGE', 'EVOLVE']: # Neural Ops
-            op_name = tval
-            self._advance()
+            return VectorLiteralNode(elements, vector_keyword_token=vector_tok)
+        elif tok['type'] in ['ATTEND', 'SAMPLE', 'PROPAGATE', 'MERGE', 'EVOLVE']:
+            op_tok = tok
+            self._advance() 
             args = []
-            # Neural ops take comma-separated expressions as args
-            if self.current_token[0] not in ['SEMICOLON', None, 'RPAREN', 'RBRACE', 'LBRACE']:
-                while True:
-                    args.append(self.parse_expression()) # Use parse_expression for args
-                    if self.current_token[0] == 'COMMA':
-                        self._advance()
-                    else:
-                        break # No more arguments if no comma
-            return NeuralOperationNode(operation_name=op_name, arguments=args)
+            # Neural ops argument parsing. Arguments are expressions.
+            # Stop before a semicolon or other statement-starting/block-ending tokens.
+            while self.current_token['type'] not in ['SEMICOLON', None, 'RPAREN', 'RBRACE', 'LBRACE', 'IF', 'DEF', 'RETURN', 'WHILE']:
+                args.append(self.parse_expression()) # Arguments are full expressions
+                if self.current_token['type'] == 'COMMA':
+                    self._advance()
+                else:
+                    break 
+            return NeuralOperationNode(op_token=op_tok, arg_nodes=args)
 
-        raise SyntaxError(f"Unexpected token {self.current_token} in parse_atom at pos {self.pos}")
+        err_tok = self.current_token
+        if err_tok.get('error_type') == 'EOF': 
+            raise SyntaxError(f"Line {err_tok['line']}:{err_tok['col']}: Unexpected end of input. Expected an expression atom.")
+        else:
+            raise SyntaxError(f"Line {err_tok['line']}:{err_tok['col']}: Unexpected token '{err_tok['value']}' (type: {err_tok['type']}) when expecting an expression atom.")
 
-    def parse_term(self): # Handles * and /
+    def parse_term(self): 
         node = self.parse_atom()
-        while self.current_token[0] in ('MULTIPLY', 'DIVIDE'):
-            op_ttype, op_tval = self.current_token
+        while self.current_token['type'] in ('MULTIPLY', 'DIVIDE'):
+            op_token = self.current_token
             self._advance()
             right = self.parse_atom()
-            node = BinaryOperationNode(node, op_tval, right)
+            node = BinaryOperationNode(left=node, op_token=op_token, right=right)
         return node
 
-    def parse_expression(self): # Handles + and - (and comparisons for simplicity here)
+    def parse_expression(self): 
         node = self.parse_term()
-        while self.current_token[0] in ('PLUS', 'MINUS', 'EQ', 'NEQ', 'LT', 'GT', 'LTE', 'GTE'):
-            op_ttype, op_tval = self.current_token
+        while self.current_token['type'] in ('PLUS', 'MINUS', 'EQ', 'NEQ', 'LT', 'GT', 'LTE', 'GTE'):
+            op_token = self.current_token
             self._advance()
             right = self.parse_term()
-            node = BinaryOperationNode(node, op_tval, right)
+            node = BinaryOperationNode(left=node, op_token=op_token, right=right)
         return node
 
     def parse_statement(self):
-        ttype, tval = self.current_token
-        if ttype == 'DEF':
+        stmt_start_token = self.current_token 
+
+        if stmt_start_token['type'] == 'DEF':
             return self.parse_function_definition()
-        elif ttype == 'RETURN':
-            self._advance()
+        elif stmt_start_token['type'] == 'RETURN':
+            self._advance() 
             expr = None
-            if self.current_token[0] != 'SEMICOLON': # RETURN value;
+            # Check if there's an expression to return or just a semicolon
+            if self.current_token['type'] != 'SEMICOLON': 
+                if self.current_token.get('error_type') == 'EOF': # Check for EOF before parsing expression
+                    raise SyntaxError(f"Line {stmt_start_token['line']}:{stmt_start_token['col']}: Unexpected EOF after RETURN. Expected expression or ';'.")
                 expr = self.parse_expression()
             self._expect('SEMICOLON')
-            return ReturnNode(expr)
-        elif ttype == 'IF':
+            return ReturnNode(return_token=stmt_start_token, expression_node=expr)
+        elif stmt_start_token['type'] == 'IF':
             return self.parse_if_statement()
-        # Assignment or lone expression (e.g. function call or neural op)
-        elif ttype == 'IDENTIFIER' and self._peek()[0] == 'ASSIGN':
-            identifier_name = self._expect('IDENTIFIER')[1]
-            self._expect('ASSIGN')
+        elif stmt_start_token['type'] == 'IDENTIFIER' and self._peek()['type'] == 'ASSIGN':
+            identifier_token = self._expect('IDENTIFIER') 
+            assign_op_token = self._expect('ASSIGN')
+            # Check for missing expression after '='
+            if self.current_token['type'] == 'SEMICOLON':
+                raise SyntaxError(f"Line {assign_op_token['line']}:{assign_op_token['col'] + len(assign_op_token['value'])}: Unexpected ';'. Expected expression after '=' for assignment to '{identifier_token['value']}'.")
+            if self.current_token.get('error_type') == 'EOF': # Check for EOF before parsing expression
+                 raise SyntaxError(f"Line {assign_op_token['line']}:{assign_op_token['col'] + len(assign_op_token['value'])}: Unexpected EOF. Expected expression after '=' for assignment to '{identifier_token['value']}'.")
             value_expr = self.parse_expression()
-            self._expect('SEMICOLON')
-            return AssignmentNode(target=identifier_name, value_expr=value_expr)
+            self._expect('SEMICOLON') 
+            return AssignmentNode(target_token=identifier_token, value_expr=value_expr, assign_op_token=assign_op_token)
         else: 
-            # Could be a function call statement, neural op statement, etc.
-            expr = self.parse_expression() 
-            if self.current_token[0] == 'SEMICOLON':
-                 self._advance() # Consume semicolon after expression statement
-            return expr
+            # This handles expression statements (e.g., function calls, standalone neural ops)
+            expr_node = self.parse_expression() 
+            # Expect a semicolon after an expression statement
+            self._expect('SEMICOLON')
+            return expr_node
 
+    def parse_block(self):
+        block_start_token = self._expect('LBRACE')
+        statements = []
+        # Allow empty blocks
+        while self.current_token['type'] != 'RBRACE' and self.current_token['type'] is not None:
+            statements.append(self.parse_statement())
+        self._expect('RBRACE')
+        return ProgramNode(statements, token=block_start_token) 
 
     def parse_function_definition(self):
-        self._expect('DEF')
-        name = self._expect('IDENTIFIER')[1]
+        def_token = self._expect('DEF')
+        name_token = self._expect('IDENTIFIER')
         self._expect('LPAREN')
         params = []
-        if self.current_token[0] != 'RPAREN':
+        if self.current_token['type'] != 'RPAREN':
             while True:
-                param_name = self._expect('IDENTIFIER')[1]
-                param_node = IdentifierNode(param_name) # Store as IdentifierNode
-                # Optional type hint: param_name : TYPE
-                if self.current_token[0] == 'COLON':
-                    self._advance() # Consume COLON
-                    type_name = self._expect('IDENTIFIER')[1] 
-                    param_node.type_hint = type_name # Add type_hint to IdentifierNode
+                param_name_token = self._expect('IDENTIFIER')
+                param_node = IdentifierNode(param_name_token)
+                if self.current_token['type'] == 'COLON':
+                    self._advance() 
+                    type_name_token = self._expect('IDENTIFIER') 
+                    param_node.type_hint = type_name_token['value'] 
                 params.append(param_node)
-                if self.current_token[0] == 'COMMA':
+                if self.current_token['type'] == 'COMMA':
                     self._advance()
-                elif self.current_token[0] == 'RPAREN':
+                elif self.current_token['type'] == 'RPAREN':
                     break
                 else:
-                    raise SyntaxError(f"Expected COMMA or RPAREN in parameter list, got {self.current_token[0]}")
+                    raise SyntaxError(f"Line {self.current_token['line']}:{self.current_token['col']}: Expected COMMA or RPAREN in parameter list, got '{self.current_token['value']}'")
         self._expect('RPAREN')
         
-        return_type_name = None
-        if self.current_token[0] == 'ARROW':
-            self._advance() # Consume ARROW
-            return_type_name = self._expect('IDENTIFIER')[1] # Store return type name
+        return_type_val = None 
+        if self.current_token['type'] == 'ARROW':
+            self._advance() 
+            return_type_token = self._expect('IDENTIFIER') 
+            return_type_val = return_type_token['value']
 
-        self._expect('LBRACE')
-        body_statements = []
-        while self.current_token[0] != 'RBRACE' and self.current_token[0] is not None:
-            body_statements.append(self.parse_statement())
-        self._expect('RBRACE')
-        return FunctionDefNode(name, params, ProgramNode(body_statements), return_type=return_type_name) # Body is a ProgramNode
-
+        body_program_node = self.parse_block() 
+        return FunctionDefNode(def_token, name_token, params, return_type_val, body_program_node)
 
     def parse_if_statement(self):
-        self._expect('IF')
-        condition = self.parse_expression()
-        self._expect('LBRACE')
-        then_branch_statements = []
-        while self.current_token[0] != 'RBRACE' and self.current_token[0] is not None:
-            then_branch_statements.append(self.parse_statement())
-        self._expect('RBRACE')
-        
-        else_branch_statements = None
-        if self.current_token[0] == 'ELSE':
+        if_token = self._expect('IF')
+        condition = self.parse_expression() 
+        then_branch = self.parse_block()
+        else_branch = None
+        if self.current_token['type'] == 'ELSE':
             self._advance()
-            self._expect('LBRACE')
-            else_branch_statements = []
-            while self.current_token[0] != 'RBRACE' and self.current_token[0] is not None:
-                else_branch_statements.append(self.parse_statement())
-            self._expect('RBRACE')
-        
-        then_program_node = ProgramNode(then_branch_statements)
-        else_program_node = ProgramNode(else_branch_statements) if else_branch_statements is not None else None
-        return IfNode(condition, then_program_node, else_program_node)
+            else_branch = self.parse_block()
+        return IfNode(if_token, condition, then_branch, else_branch)
 
-
-    def parse(self):
+    def parse(self): 
         statements = []
-        while self.current_token[0] is not None: # While not EOF
+        program_node_token_ref = self.tokens[0] if self.tokens else {'line': 1, 'col': 1, 'value': 'ProgramStart', 'type':'PROGRAM_START'}
+
+        while self.current_token['type'] is not None: 
             try:
                 statement = self.parse_statement()
-                if statement: # Ensure statement is not None (e.g. from error recovery)
+                if statement: 
                     statements.append(statement)
-                # If parse_statement consumed all tokens (e.g. single expression without semicolon)
-                if self.current_token[0] is None and not statements:
-                    # If it was a single expression program that parse_statement returned
-                    return ProgramNode([statement]) if statement else ProgramNode([])
-
-
+                if self.current_token['type'] is None and not statements and statement: # Single expression program
+                     return ProgramNode([statement], token=program_node_token_ref)
             except SyntaxError as e:
-                print(f"Syntax Error during parsing: {e}") 
-                # Simple error recovery: skip the problematic token and try to continue.
-                # This might lead to cascaded errors or incomplete ASTs.
-                # A more robust recovery would try to find a synchronization point (e.g., next SEMICOLON or RBRACE).
-                # For now, we break on error to avoid potential infinite loops with naive advance.
-                # self._advance() 
-                break 
-        return ProgramNode(statements)
+                # Ensure lineno and offset are set on the exception for consistent error reporting
+                # Python's SyntaxError might not have these if raised manually without them.
+                final_line = getattr(e, 'lineno', self.current_token['line'])
+                final_col = getattr(e, 'offset', self.current_token['col'])
+                if final_line is None or final_line == -1 : final_line = self.eof_sentinel['line']
+                if final_col is None or final_col == -1 : final_col = self.eof_sentinel['col']
+                
+                # Reconstruct message if needed to ensure line/col are prominent
+                msg_prefix = f"Line {final_line}:{final_col}: "
+                original_msg = str(e)
+                # Avoid double-prefixing if the error message from _expect already has it
+                msg = original_msg if original_msg.lower().startswith("line ") else msg_prefix + original_msg
+                
+                print(f"Parser Error: {msg}") 
+                
+                error_node = ASTNode(node_type="ErrorNode", value=msg, 
+                                     token={'line': final_line, 'col': final_col, 'type': 'ERROR'})
+                statements.append(error_node)
+                # For this subtask, return partial AST upon first error.
+                return ProgramNode(statements, token=program_node_token_ref) 
+        
+        final_program_token = program_node_token_ref
+        if statements:
+            first_stmt = statements[0]
+            if hasattr(first_stmt, 'token') and first_stmt.token:
+                final_program_token = first_stmt.token
+            elif hasattr(first_stmt, 'line') and first_stmt.line is not None:
+                 final_program_token = {'line': first_stmt.line, 'col': first_stmt.col, 'value':'ProgramStart', 'type':'PROGRAM_START'}
+        
+        return ProgramNode(statements, token=final_program_token)
 
 if __name__ == '__main__':
-    # Assuming lexer.py is in the same directory or accessible
-    # from ..lexer.lexer import tokenize # If lexer is in neuralscript-core/lexer/
-    
-    # Fallback: Re-define tokenize for standalone testing if import fails
-    def tokenize_placeholder(code):
-        import re
-        temp_tokens_spec = [
-            ("DEF", r"DEF\b"), ("RETURN", r"RETURN\b"), ("IF", r"IF\b"), ("ELSE", r"ELSE\b"),
-            ("TRUE", r"TRUE\b"), ("FALSE", r"FALSE\b"),
-            ("ATTEND", r"ATTEND\b"), ("MERGE", r"MERGE\b"), ("SAMPLE", r"SAMPLE\b"),
-            ("PROPAGATE", r"PROPAGATE\b"),("EVOLVE", r"EVOLVE\b"),
-            ("VECTOR", r"VECTOR\b"), ("MATRIX", r"MATRIX\b"),("SCALAR", r"SCALAR\b"),
-            ("IDENTIFIER", r"[a-zA-Z_][a-zA-Z0-9_]*"),
-            ("NUMBER", r"[0-9]+(?:\.[0-9]+)?"), ("STRING", r'"[^"]*"'),
-            ("ARROW", r"->"), ("EQ", r"=="),("NEQ", r"!="), ("LTE", r"<="), ("GTE", r">="),
-            ("LT", r"<"), ("GT", r">"),
-            ("PLUS", r"\+"),("MINUS", r"-"),("MULTIPLY", r"\*"),("DIVIDE", r"/"),
-            ("ASSIGN", r"="),
-            ("LPAREN", r"\("), ("RPAREN", r"\)"), ("LBRACE", r"\{"), ("RBRACE", r"\}"),
-            ("LBRACKET", r"\["), ("RBRACKET", r"\]"), ("COMMA", r","),
-            ("SEMICOLON", r";"), ("COLON", r":"),
-            ("WHITESPACE", r"[ \t\n]+"), ("COMMENT", r"//[^\n]*")
-        ]
+    import re 
+    _LEXER_TOKENS_SPEC = [ 
+        ("DEF", r"DEF\b"), ("RETURN", r"RETURN\b"), ("IF", r"IF\b"), ("ELSE", r"ELSE\b"),
+        ("TRUE", r"TRUE\b"), ("FALSE", r"FALSE\b"),
+        ("ATTEND", r"ATTEND\b"), ("MERGE", r"MERGE\b"), ("VECTOR", r"VECTOR\b"),("SCALAR", r"SCALAR\b"),
+        ("IDENTIFIER", r"[a-zA-Z_][a-zA-Z0-9_]*"),
+        ("NUMBER", r"[0-9]+(?:\.[0-9]+)?"), ("STRING", r'"[^"]*"'),
+        ("ARROW", r"->"), ("EQ", r"=="), ("ASSIGN", r"="), ("PLUS", r"\+"),
+        ("LPAREN", r"\("), ("RPAREN", r"\)"), ("LBRACE", r"\{"), ("RBRACE", r"\}"),
+        ("LBRACKET", r"\["), ("RBRACKET", r"\]"), ("COMMA", r","),
+        ("SEMICOLON", r";"), ("COLON", r":"),
+        ("NEWLINE", r"\n"), ("WHITESPACE", r"[ \t]+"), ("COMMENT", r"//[^\n]*")
+    ]
+    def tokenize_for_parser_test(code): 
         tokens = []
-        idx = 0
-        code_len = len(code)
-        while idx < code_len:
-            matched_this_round = False
-            for token_name, token_regex in temp_tokens_spec:
-                match = re.match(token_regex, code[idx:])
+        line, col = 1, 1
+        remaining = code
+        while remaining:
+            matched_any = False
+            for name, regex in _LEXER_TOKENS_SPEC:
+                match = re.match(regex, remaining)
                 if match:
-                    value = match.group(0)
-                    if token_name not in ["WHITESPACE", "COMMENT"]:
-                        tokens.append((token_name, value))
-                    idx += len(value)
-                    matched_this_round = True
+                    val = match.group(0)
+                    tok_data = {'type': name, 'value': val, 'line': line, 'col': col}
+                    if name == 'NEWLINE': line += 1; col = 1
+                    elif name not in ['WHITESPACE', 'COMMENT', 'NEWLINE']: 
+                        tokens.append(tok_data)
+                        col += len(val) 
+                    elif name in ['WHITESPACE', 'COMMENT']: 
+                        col += len(val)
+                    remaining = remaining[len(val):]
+                    matched_any = True
                     break
-            if not matched_this_round:
-                # print(f"Unknown token start: {code[idx]}")
-                tokens.append(("UNKNOWN", code[idx]))
-                idx += 1
+            if not matched_any: 
+                tokens.append({'type': 'UNKNOWN', 'value': remaining[0], 'line': line, 'col': col})
+                remaining = remaining[1:]; col += 1
         return tokens
 
-    sample_code_complex = """
-    DEF process_vectors(q_vec: VECTOR, k_vec: VECTOR) -> VECTOR {
-        // A neural operation as part of an assignment
-        attention_output = ATTEND q_vec, k_vec, k_vec; 
+    print("--- Testing Parser with Valid Code ---")
+    valid_code = "x = 10 + y; DEF my_func() -> SCALAR { RETURN x; }"
+    tokens_valid = tokenize_for_parser_test(valid_code)
+    parser_valid = Parser(tokens_valid)
+    ast_valid = parser_valid.parse()
+    is_error_present_valid = any(child.type == "ErrorNode" for child in ast_valid.children) if hasattr(ast_valid, 'children') and ast_valid.children else False
+    if not is_error_present_valid:
+        print("Valid code parsed successfully.")
+    else:
+        print("Valid code parsing reported an error unexpectedly.")
+        if hasattr(ast_valid, 'children') and ast_valid.children:
+            for node_item in ast_valid.children: 
+                if node_item.type == "ErrorNode": print(f"  ErrorNode content: {node_item.value}")
+
+
+    print("\n--- Testing Parser with Syntax Error: Missing Semicolon ---")
+    error_code_semicolon = "x = 10\ny = 20;" # Error should be on 'y' as unexpected or missing ';' after '10'
+    tokens_err_semi = tokenize_for_parser_test(error_code_semicolon)
+    parser_err_semi = Parser(tokens_err_semi)
+    ast_err_semi = parser_err_semi.parse() 
+    is_error_present_semi = any(child.type == "ErrorNode" for child in ast_err_semi.children) if hasattr(ast_err_semi, 'children') and ast_err_semi.children else False
+    if is_error_present_semi:
+        print("Parsed with error as expected (Missing Semicolon / Unexpected token 'y').")
+    else:
+        print("FAIL: Expected error for missing semicolon, but none found.")
+
+
+    print("\n--- Testing Parser with Syntax Error: Unexpected Token ---")
+    error_code_unexpected = "x = @ + 1;" 
+    tokens_err_unexp = tokenize_for_parser_test(error_code_unexpected) 
+    parser_err_unexp = Parser(tokens_err_unexp)
+    ast_err_unexp = parser_err_unexp.parse()
+    is_error_present_unexp = any(child.type == "ErrorNode" for child in ast_err_unexp.children) if hasattr(ast_err_unexp, 'children') and ast_err_unexp.children else False
+    if is_error_present_unexp:
+        print("Parsed with error as expected (Unexpected Token).")
+    else:
+        print("FAIL: Expected error for unexpected token, but none found.")
         
-        // An assignment with an expression
-        intermediate_result = attention_output + VECTOR [1.0, 0.5];
-        
-        IF TRUE == FALSE {
-            final_result = MERGE intermediate_result, q_vec;
-        } ELSE {
-            final_result = intermediate_result;
-        }
-        RETURN final_result;
-    }
+    print("\n--- Testing Parser with Syntax Error: Missing RPAREN ---")
+    error_code_rparen = "CALL my_func(arg1, arg2 ;" 
+    tokens_err_rparen = tokenize_for_parser_test(error_code_rparen)
+    parser_err_rparen = Parser(tokens_err_rparen)
+    ast_err_rparen = parser_err_rparen.parse()
+    is_error_present_rparen = any(child.type == "ErrorNode" for child in ast_err_rparen.children) if hasattr(ast_err_rparen, 'children') and ast_err_rparen.children else False
+    if is_error_present_rparen:
+        print("Parsed with error as expected (Missing RPAREN).")
+    else:
+        print("FAIL: Expected error for missing RPAREN, but none found.")
 
-    main_query = VECTOR [0.1, 0.2, 0.3];
-    main_keys = VECTOR [0.4, 0.5, 0.6];
-    
-    // Function call
-    output_vector = process_vectors(main_query, main_keys); 
-    // A standalone neural op
-    SAMPLE output_vector;
-    """
+    print("\n--- Testing Parser with Syntax Error: Incomplete Assignment ---")
+    error_code_incomplete_assign = "my_var = ;"
+    tokens_err_incomplete = tokenize_for_parser_test(error_code_incomplete_assign)
+    parser_err_incomplete = Parser(tokens_err_incomplete)
+    ast_incomplete = parser_err_incomplete.parse()
+    is_error_present_incomplete = any(child.type == "ErrorNode" for child in ast_incomplete.children) if hasattr(ast_incomplete, 'children') and ast_incomplete.children else False
+    if is_error_present_incomplete:
+        print("Parsed with error as expected (Incomplete Assignment).")
+    else:
+        print("FAIL: Expected error for incomplete assignment, but none found.")
 
-    print("--- Parsing Complex Sample ---")
-    tokens_complex = tokenize_placeholder(sample_code_complex)
-    # print("\nTokens for complex sample:")
-    # for token_tup in tokens_complex: print(token_tup)
-    
-    parser_complex = Parser(tokens_complex)
-    ast_complex = parser_complex.parse()
-    print("\nAST for complex sample:")
-    print(ast_complex)
-
-    print("\n--- Parsing Simpler ATTEND statement (direct expression) ---")
-    tokens_attend_direct = tokenize_placeholder("ATTEND query, key, value;")
-    parser_attend_direct = Parser(tokens_attend_direct)
-    ast_attend_direct = parser_attend_direct.parse()
-    print(ast_attend_direct)
-
-    print("\n--- Parsing Assignment with ATTEND ---")
-    tokens_attend_assign = tokenize_placeholder("processed = ATTEND query, key, value;")
-    parser_attend_assign = Parser(tokens_attend_assign)
-    ast_attend_assign = parser_attend_assign.parse()
-    print(ast_attend_assign)
-    
-    print("\n--- Parsing simple IF statement ---")
-    # Note: The previous example was missing semicolons, which the current parser expects.
-    tokens_if = tokenize_placeholder("IF x == y { x = x + 1; } ELSE { y = y + 1; }")
-    parser_if = Parser(tokens_if)
-    ast_if = parser_if.parse()
-    print(ast_if)
-
-    print("\n--- Parsing function call with no args ---")
-    tokens_call_no_args = tokenize_placeholder("do_something();")
-    parser_call_no_args = Parser(tokens_call_no_args)
-    ast_call_no_args = parser_call_no_args.parse()
-    print(ast_call_no_args)
-
-    print("\n--- Parsing empty vector literal ---")
-    tokens_empty_vec = tokenize_placeholder("empty_v = VECTOR [];")
-    parser_empty_vec = Parser(tokens_empty_vec)
-    ast_empty_vec = parser_empty_vec.parse()
-    print(ast_empty_vec)
-
-    print("\n--- Parsing vector with one element ---")
-    tokens_single_el_vec = tokenize_placeholder("single_v = VECTOR [1.0];")
-    parser_single_el_vec = Parser(tokens_single_el_vec)
-    ast_single_el_vec = parser_single_el_vec.parse()
-    print(ast_single_el_vec)
-
-    print("\n--- Parsing function def with no params and no return type annotation ---")
-    tokens_simple_func = tokenize_placeholder("DEF simple_func() { RETURN 1; }")
-    parser_simple_func = Parser(tokens_simple_func)
-    ast_simple_func = parser_simple_func.parse()
-    print(ast_simple_func)
+    print("\n--- Testing Parser with Syntax Error: EOF in vector ---")
+    error_code_eof_vector = "v = VECTOR [1, 2" 
+    tokens_eof_vector = tokenize_for_parser_test(error_code_eof_vector)
+    parser_eof_vector = Parser(tokens_eof_vector)
+    ast_eof_vector = parser_eof_vector.parse()
+    is_error_present_eof_vector = any(child.type == "ErrorNode" for child in ast_eof_vector.children) if hasattr(ast_eof_vector, 'children') and ast_eof_vector.children else False
+    if is_error_present_eof_vector:
+        print("Parsed with error as expected (EOF in vector).")
+    else:
+        print("FAIL: Expected error for EOF in vector, but none found.")

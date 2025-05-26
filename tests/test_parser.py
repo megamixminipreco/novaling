@@ -91,6 +91,39 @@ class TestParser(unittest.TestCase):
         self.assertEqual(return_node.type, 'Return') 
         self.assertEqual(return_node.children[0].name, 'a') # ReturnNode's child is IdentifierNode 'a'
 
+    def test_parser_error_missing_semicolon(self):
+        # Expected error: "Line 1:Col 7: Expected token type SEMICOLON, got type IDENTIFIER (value: 'y')"
+        # The parse_statement for "x = 10" will consume "x", "=", "10".
+        # Then it will expect a SEMICOLON. current_token will be 'y'.
+        code = "x = 10 y = 20;"
+        tokens = tokenize(code) # Lexer output is fine
+        parser = Parser(tokens)
+        with self.assertRaisesRegex(SyntaxError, r"Line 1:Col 8: Expected token type SEMICOLON, got type IDENTIFIER"):
+            parser.parse()
+
+    def test_parser_error_unexpected_token_in_expression(self):
+        # Expected error: "Line 1:Col 8: Unexpected token '%' (type: UNKNOWN) when expecting an expression atom."
+        code = "x = 10 + % 5;" 
+        tokens = tokenize(code) # Lexer will make % an UNKNOWN token
+        parser = Parser(tokens)
+        with self.assertRaisesRegex(SyntaxError, r"Line 1:Col 8: Unexpected token '%' \(type: UNKNOWN\) when expecting an expression atom."):
+            parser.parse()
+            
+    def test_parser_error_unexpected_eof(self):
+        # Expected: "Line 1:Col 18: Unexpected end of input. Expected 'RBRACE'."
+        code = "DEF my_func() {" # Missing closing RBRACE for block and function
+        tokens = tokenize(code)
+        parser = Parser(tokens)
+        with self.assertRaisesRegex(SyntaxError, r"Line 1:Col \d+: Unexpected end of input. Expected 'RBRACE'"):
+            parser.parse()
+
+    def test_parser_error_mismatched_delimiter(self):
+        # Expected: "Line 1:Col 24: Expected COMMA or RBRACKET in vector literal, got RPAREN"
+        code = "my_vector = VECTOR [1, 2, 3);" 
+        tokens = tokenize(code)
+        parser = Parser(tokens)
+        with self.assertRaisesRegex(SyntaxError, r"Line 1:Col \d+: Expected COMMA or RBRACKET in vector literal, got RPAREN"):
+            parser.parse()
 
 if __name__ == '__main__':
     unittest.main()
